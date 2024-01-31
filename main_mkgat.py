@@ -4,17 +4,16 @@ import random
 from time import time
 
 import pandas as pd
-import torch
 from tqdm import tqdm
 import torch.nn as nn
 import torch.optim as optim
 
-from model.VBPR import VBPR
-from parsers.parser_vbpr import *
+from model.KGAT import KGAT
+from parsers.parser_kgat import *
 from utils.log_helper import *
 from utils.metrics import *
 from utils.model_helper import *
-from data_loader.loader_vbpr import DataLoaderVBPR
+from data_loader.loader_kgat import DataLoaderKGAT
 
 
 def evaluate(model, dataloader, Ks, device):
@@ -40,7 +39,7 @@ def evaluate(model, dataloader, Ks, device):
             batch_user_ids = batch_user_ids.to(device)
 
             with torch.no_grad():
-                batch_scores = model(batch_user_ids, item_ids, is_train=False)       # (n_batch_users, n_items)
+                batch_scores = model(batch_user_ids, item_ids, mode='predict')       # (n_batch_users, n_items)
 
             batch_scores = batch_scores.cpu()
             batch_metrics = calc_metrics_at_k(batch_scores, train_user_dict, test_user_dict, batch_user_ids.cpu().numpy(), item_ids.cpu().numpy(), Ks)
@@ -73,24 +72,23 @@ def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # load data
-    data = DataLoaderVBPR(args, logging)
+    data = DataLoaderKGAT(args, logging)
     if args.use_pretrain == 1:
         user_pre_embed = torch.tensor(data.user_pre_embed)
         item_pre_embed = torch.tensor(data.item_pre_embed)
     else:
         user_pre_embed, item_pre_embed = None, None
 
-    item_visual_pre_embed = torch.Tensor(data.item_pre_visual_feature)
-
     # construct model & optimizer
-    model = VBPR(args, data.n_users, data.n_items, user_pre_embed, item_pre_embed, item_visual_pre_embed)
+    model = KGAT(args, data.n_users, data.n_entities, data.n_relations, data.A_in, user_pre_embed, item_pre_embed)
     if args.use_pretrain == 2:
         model = load_model(model, args.pretrain_model_path)
 
     model.to(device)
     logging.info(model)
 
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    cf_optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    kg_optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
     # initialize metrics
     best_epoch = -1
@@ -105,40 +103,81 @@ def train(args):
 
     # train model
     for epoch in range(1, args.n_epoch + 1):
+        time0 = time()
         model.train()
 
         # train cf
         time1 = time()
-        total_loss = 0
-        n_batch = data.n_cf_train // data.train_batch_size + 1
+        cf_total_loss = 0
+        n_cf_batch = data.n_cf_train // data.cf_batch_size + 1
 
-        for iter in range(1, n_batch + 1):
+        for iter in range(1, n_cf_batch + 1):
             time2 = time()
-            batch_user, batch_pos_item, batch_neg_item = data.generate_cf_batch(data.train_user_dict, data.train_batch_size)
-            batch_user = batch_user.to(device)
-            batch_pos_item = batch_pos_item.to(device)
-            batch_neg_item = batch_neg_item.to(device)
-            batch_loss = model(batch_user, batch_pos_item, batch_neg_item, is_train=True)
+            cf_batch_user, cf_batch_pos_item, cf_batch_neg_item = data.generate_cf_batch(data.train_user_dict, data.cf_batch_size)
+            cf_batch_user = cf_batch_user.to(device)
+            cf_batch_pos_item = cf_batch_pos_item.to(device)
+            cf_batch_neg_item = cf_batch_neg_item.to(device)
 
-            if np.isnan(batch_loss.cpu().detach().numpy()):
-                logging.info('ERROR: Epoch {:04d} Iter {:04d} / {:04d} Loss is nan.'.format(epoch, iter, n_batch))
+            cf_batch_loss = model(cf_batch_user, cf_batch_pos_item, cf_batch_neg_item, mode='train_cf')
+
+            if np.isnan(cf_batch_loss.cpu().detach().numpy()):
+                logging.info('ERROR (CF Training): Epoch {:04d} Iter {:04d} / {:04d} Loss is nan.'.format(epoch, iter, n_cf_batch))
                 sys.exit()
 
-            batch_loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
-            total_loss += batch_loss.item()
+            cf_batch_loss.backward()
+            cf_optimizer.step()
+            cf_optimizer.zero_grad()
+            cf_total_loss += cf_batch_loss.item()
 
-            if (iter % args.print_every) == 0:
-                logging.info('CF Training: Epoch {:04d} Iter {:04d} / {:04d} | Time {:.1f}s | Iter Loss {:.4f} | Iter Mean Loss {:.4f}'.format(epoch, iter, n_batch, time() - time2, batch_loss.item(), total_loss / iter))
-        logging.info('CF Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Iter Mean Loss {:.4f}'.format(epoch, n_batch, time() - time1, total_loss / n_batch))
+            if (iter % args.cf_print_every) == 0:
+                logging.info('CF Training: Epoch {:04d} Iter {:04d} / {:04d} | Time {:.1f}s | Iter Loss {:.4f} | Iter Mean Loss {:.4f}'.format(epoch, iter, n_cf_batch, time() - time2, cf_batch_loss.item(), cf_total_loss / iter))
+        logging.info('CF Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Iter Mean Loss {:.4f}'.format(epoch, n_cf_batch, time() - time1, cf_total_loss / n_cf_batch))
+
+        # train kg
+        time3 = time()
+        kg_total_loss = 0
+        n_kg_batch = data.n_kg_train // data.kg_batch_size + 1
+
+        for iter in range(1, n_kg_batch + 1):
+            time4 = time()
+            kg_batch_head, kg_batch_relation, kg_batch_pos_tail, kg_batch_neg_tail = data.generate_kg_batch(data.train_kg_dict, data.kg_batch_size, data.n_users_entities)
+            kg_batch_head = kg_batch_head.to(device)
+            kg_batch_relation = kg_batch_relation.to(device)
+            kg_batch_pos_tail = kg_batch_pos_tail.to(device)
+            kg_batch_neg_tail = kg_batch_neg_tail.to(device)
+
+            kg_batch_loss = model(kg_batch_head, kg_batch_relation, kg_batch_pos_tail, kg_batch_neg_tail, mode='train_kg')
+
+            if np.isnan(kg_batch_loss.cpu().detach().numpy()):
+                logging.info('ERROR (KG Training): Epoch {:04d} Iter {:04d} / {:04d} Loss is nan.'.format(epoch, iter, n_kg_batch))
+                sys.exit()
+
+            kg_batch_loss.backward()
+            kg_optimizer.step()
+            kg_optimizer.zero_grad()
+            kg_total_loss += kg_batch_loss.item()
+
+            if (iter % args.kg_print_every) == 0:
+                logging.info('KG Training: Epoch {:04d} Iter {:04d} / {:04d} | Time {:.1f}s | Iter Loss {:.4f} | Iter Mean Loss {:.4f}'.format(epoch, iter, n_kg_batch, time() - time4, kg_batch_loss.item(), kg_total_loss / iter))
+        logging.info('KG Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Iter Mean Loss {:.4f}'.format(epoch, n_kg_batch, time() - time3, kg_total_loss / n_kg_batch))
+
+        # update attention
+        time5 = time()
+        h_list = data.h_list.to(device)
+        t_list = data.t_list.to(device)
+        r_list = data.r_list.to(device)
+        relations = list(data.laplacian_dict.keys())
+        model(h_list, t_list, r_list, relations, mode='update_att')
+        logging.info('Update Attention: Epoch {:04d} | Total Time {:.1f}s'.format(epoch, time() - time5))
+
+        logging.info('CF + KG Training: Epoch {:04d} | Total Time {:.1f}s'.format(epoch, time() - time0))
 
         # evaluate cf
         if (epoch % args.evaluate_every) == 0 or epoch == args.n_epoch:
-            time3 = time()
+            time6 = time()
             _, metrics_dict = evaluate(model, data, Ks, device)
             logging.info('CF Evaluation: Epoch {:04d} | Total Time {:.1f}s | Precision [{:.4f}, {:.4f}], Recall [{:.4f}, {:.4f}], NDCG [{:.4f}, {:.4f}]'.format(
-                epoch, time() - time3, metrics_dict[k_min]['precision'], metrics_dict[k_max]['precision'], metrics_dict[k_min]['recall'], metrics_dict[k_max]['recall'], metrics_dict[k_min]['ndcg'], metrics_dict[k_max]['ndcg']))
+                epoch, time() - time6, metrics_dict[k_min]['precision'], metrics_dict[k_max]['precision'], metrics_dict[k_min]['recall'], metrics_dict[k_max]['recall'], metrics_dict[k_min]['ndcg'], metrics_dict[k_max]['ndcg']))
 
             epoch_list.append(epoch)
             for k in Ks:
@@ -176,10 +215,10 @@ def predict(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # load data
-    data = DataLoaderVBPR(args, logging)
-    item_visual_pre_embed = torch.Tensor(data.item_pre_visual_feature)
+    data = DataLoaderKGAT(args, logging)
+
     # load model
-    model = VBPR(args, data.n_users, data.n_items, item_visual_pre_embed=item_visual_pre_embed)
+    model = KGAT(args, data.n_users, data.n_entities, data.n_relations)
     model = load_model(model, args.pretrain_model_path)
     model.to(device)
 
@@ -196,7 +235,7 @@ def predict(args):
 
 
 if __name__ == '__main__':
-    args = parse_bprmf_args()
+    args = parse_kgat_args()
     train(args)
     # predict(args)
 
