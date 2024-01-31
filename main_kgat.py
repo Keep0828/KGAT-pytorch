@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.optim as optim
 
 from model.KGAT import KGAT
-from parser.parser_kgat import *
+from parsers.parser_kgat import *
 from utils.log_helper import *
 from utils.metrics import *
 from utils.model_helper import *

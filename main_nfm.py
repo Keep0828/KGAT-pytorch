@@ -11,7 +11,7 @@ import torch.optim as optim
 import torch.multiprocessing as mp
 
 from model.NFM import NFM
-from parser.parser_nfm import *
+from parsers.parser_nfm import *
 from utils.log_helper import *
 from utils.metrics import *
 from utils.model_helper import *

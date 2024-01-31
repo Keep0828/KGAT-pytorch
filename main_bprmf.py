@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.optim as optim
 
 from model.BPRMF import BPRMF
-from parser.parser_bprmf import *
+from parsers.parser_bprmf import *
 from utils.log_helper import *
 from utils.metrics import *
 from utils.model_helper import *

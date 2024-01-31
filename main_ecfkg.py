@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.optim as optim
 
 from model.ECFKG import ECFKG
-from parser.parser_ecfkg import *
+from parsers.parser_ecfkg import *
 from utils.log_helper import *
 from utils.metrics import *
 from utils.model_helper import *

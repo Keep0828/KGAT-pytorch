@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.optim as optim
 
 from model.CKE import CKE
-from parser.parser_cke import *
+from parsers.parser_cke import *
 from utils.log_helper import *
 from utils.metrics import *
 from utils.model_helper import *
